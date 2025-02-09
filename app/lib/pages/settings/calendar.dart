@@ -15,10 +15,11 @@ class CalendarPage extends StatefulWidget {
 class _CalendarPageState extends State<CalendarPage> {
   @override
   void initState() {
-    () async {
-      await Provider.of<CalenderProvider>(context, listen: false).initialize();
-    }.withPostFrameCallback();
     super.initState();
+    // Initialize the calendar provider after the widget is built.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Provider.of<CalenderProvider>(context, listen: false).initialize();
+    });
   }
 
   @override
@@ -88,7 +89,7 @@ class _CalendarPageState extends State<CalendarPage> {
                     )
                   : const SizedBox(),
               if (provider.calendarEnabled) ...[
-                // TODO: make this not clickable, so when it clicks opens rather a dialog explaining not available
+                // Option to toggle between auto and manual modes
                 RadioListTile(
                   title: const Text('Automatic'),
                   subtitle: const Text('Your events will be created automatically.'),
@@ -101,7 +102,6 @@ class _CalendarPageState extends State<CalendarPage> {
                     );
                   },
                 ),
-
                 RadioListTile(
                   title: const Text('Manual'),
                   subtitle: const Text(
@@ -138,7 +138,7 @@ class _CalendarPageState extends State<CalendarPage> {
       const Padding(
         padding: EdgeInsets.symmetric(horizontal: 32),
         child: Text(
-          'Which calendar Omi will schedule to?',
+          'Which calendar will Omi use to schedule events?',
           style: TextStyle(color: Colors.grey),
         ),
       ),
@@ -150,7 +150,21 @@ class _CalendarPageState extends State<CalendarPage> {
           subtitle: (calendar.accountName?.isNotEmpty ?? false) ? Text(calendar.accountName!) : null,
           value: calendar.id!,
           groupValue: SharedPreferencesUtil().calendarId,
-          onChanged: (v) => provider.selectCalendar(v, calendar),
+          onChanged: (v) {
+            provider.selectCalendar(v, calendar);
+          },
+        ),
+      // Add option to view Google Calendar event if enabled
+      if (provider.calendarEnabled)
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: ElevatedButton(
+            onPressed: () {
+              // This could trigger viewing the calendar event linked to a memory
+              provider.viewInCalendar('event-id');
+            },
+            child: const Text('View Calendar Event'),
+          ),
         ),
     ];
   }
