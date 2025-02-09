@@ -1,125 +1,153 @@
-import 'package:googleapis/calendar/v3.dart' as google_calendar;
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter/material.dart';
+import 'package:friend_private/backend/preferences.dart';
+import 'package:friend_private/utils/alerts/app_snackbar.dart';
+import 'package:friend_private/utils/analytics/mixpanel.dart';
+import 'package:friend_private/utils/features/calendar.dart';
+import 'package:manage_calendar_events/manage_calendar_events.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:googleapis/calendar/v3.dart' as google_calendar; // You will need the Google Calendar API
 
 class CalendarProvider extends ChangeNotifier {
-  // Existing code...
+  List<Calendar> calendars = [];
+  bool calendarEnabled = false;
+  final CalendarUtil _calendarUtil = CalendarUtil();
+  final MixpanelManager _mixpanelManager = MixpanelManager();
+  final SharedPreferencesUtil _sharedPreferencesUtil = SharedPreferencesUtil();
+  bool isLoading = false;
 
-  // Add Google Calendar API client
-  google_calendar.CalendarApi? _googleCalendarApi;
-  final GoogleSignIn _googleSignIn = GoogleSignIn(
-    scopes: [
-      'https://www.googleapis.com/auth/calendar.events',
-      'https://www.googleapis.com/auth/calendar.readonly',
-    ],
-  );
+  // Google Calendar API Client
+  google_calendar.CalendarApi? _calendarApi;
 
-  // Add a method to initialize Google Calendar API
+  void setLoading(bool value) {
+    isLoading = value;
+    notifyListeners();
+  }
+
+  Future<void> initialize() async {
+    calendarEnabled = await hasCalendarAccess();
+    if (await hasCalendarAccess()) {
+      await _getCalendars();
+    }
+    await initializeGoogleCalendar();
+  }
+
   Future<void> initializeGoogleCalendar() async {
-    try {
-      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
-      if (googleUser != null) {
-        final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
-        final authHeaders = await googleUser.authHeaders;
-        final authenticatedClient = GoogleAuthClient(authHeaders);
-        _googleCalendarApi = google_calendar.CalendarApi(authenticatedClient);
+    // Initialize Google Calendar API client here (authentication and setup)
+    // For example: _calendarApi = await GoogleAuthUtil.getGoogleCalendarApi();
+    // The auth token could be stored and reused for the app session.
+  }
+
+  Future<void> _getCalendars() async {
+    calendars = await _calendarUtil.fetchCalendars();
+    notifyListeners();
+  }
+
+  Future<bool> hasCalendarAccess() async {
+    return await _calendarUtil.checkCalendarPermission();
+  }
+
+  Future<void> onCalendarSwitchChanged(bool s) async {
+    if (s) {
+      var res = await Permission.calendarFullAccess.request();
+      print('res: $res');
+      _sharedPreferencesUtil.calendarPermissionAlreadyRequested = true;
+      bool hasAccess = await hasCalendarAccess();
+      print('hasAccess: $hasAccess');
+      if (res.isGranted || hasAccess) {
+        setLoading(true);
+        await _getCalendars();
+        await Future.delayed(const Duration(seconds: 3), () async {
+          await _getCalendars();
+        });
+        setLoading(false);
+        if (calendars.isEmpty) {
+          AppSnackbar.showSnackbar(
+            'No calendars found. Please check your device settings.',
+            duration: const Duration(seconds: 5),
+          );
+          calendarEnabled = false;
+        } else {
+          calendarEnabled = true;
+          _mixpanelManager.calendarEnabled();
+        }
+      } else {
+        AppSnackbar.showSnackbar(
+          'Calendar access was denied. Please enable it in your app settings.',
+          duration: const Duration(seconds: 5),
+        );
+        calendarEnabled = false;
       }
-    } catch (e) {
-      print('Error initializing Google Calendar: $e');
-      AppSnackbar.showSnackbar('Failed to connect to Google Calendar. Please try again.');
+    } else {
+      _sharedPreferencesUtil.calendarId = '';
+      _sharedPreferencesUtil.calendarType = 'auto';
+      _mixpanelManager.calendarDisabled();
+      calendarEnabled = false;
+    }
+    _sharedPreferencesUtil.calendarEnabled = calendarEnabled;
+    notifyListeners();
+  }
+
+  void onCalendarTypeChanged(String? v) {
+    _sharedPreferencesUtil.calendarType = v!;
+    _mixpanelManager.calendarTypeChanged(v);
+    notifyListeners();
+  }
+
+  void selectCalendar(String? value, Calendar calendar) {
+    _sharedPreferencesUtil.calendarId = value!;
+    notifyListeners();
+    _mixpanelManager.calendarSelected();
+    AppSnackbar.showSnackbar(
+      'Calendar ${calendar.name} selected.',
+      duration: const Duration(seconds: 1),
+    );
+  }
+
+  // New method for integrating with Google Calendar and pulling context for memories
+  Future<void> linkEventToMemory(DateTime memoryTimestamp) async {
+    if (_calendarApi == null) return;
+
+    // Check for events around the memory timestamp
+    final google_calendar.Events events = await _calendarApi!.events.list(
+      'primary',
+      timeMin: memoryTimestamp.subtract(Duration(hours: 1)).toUtc(),
+      timeMax: memoryTimestamp.add(Duration(hours: 1)).toUtc(),
+      singleEvents: true,
+      orderBy: 'startTime',
+    );
+
+    if (events.items != null && events.items!.isNotEmpty) {
+      final event = events.items!.first; // Assume the first event is the most relevant
+      // Here, you would enrich the memory with event details
+      String eventTitle = event.summary ?? "No Title";
+      String eventDescription = event.description ?? "No Description";
+      List<String> attendees = event.attendees?.map((attendee) => attendee.email ?? "").toList() ?? [];
+
+      // Call the method to link the event to the memory (you'll need to implement memory logic)
+      // Example: MemoryUtil.linkMemoryToEvent(memoryId, eventTitle, eventDescription, attendees);
+      
+      // Display linked event in the UI (if required)
+      AppSnackbar.showSnackbar('Linked event: $eventTitle', duration: const Duration(seconds: 3));
     }
   }
 
-  // Add a method to fetch Google Calendar events
-  Future<List<google_calendar.Event>> fetchGoogleCalendarEvents(DateTime startTime, DateTime endTime) async {
-    if (_googleCalendarApi == null) {
-      await initializeGoogleCalendar();
-    }
-    try {
-      final events = await _googleCalendarApi!.events.list(
-        'primary',
-        timeMin: startTime.toUtc(),
-        timeMax: endTime.toUtc(),
-        singleEvents: true,
-        orderBy: 'startTime',
-      );
-      return events.items ?? [];
-    } catch (e) {
-      print('Error fetching Google Calendar events: $e');
-      AppSnackbar.showSnackbar('Failed to fetch Google Calendar events.');
-      return [];
-    }
+  // Method to create Google Calendar events via chat (simple example)
+  Future<void> createEventFromChat(String title, DateTime dateTime) async {
+    if (_calendarApi == null) return;
+
+    google_calendar.Event event = google_calendar.Event(
+      summary: title,
+      start: google_calendar.EventDateTime(dateTime: dateTime.toUtc()),
+      end: google_calendar.EventDateTime(dateTime: dateTime.add(Duration(hours: 1)).toUtc()),
+    );
+
+    await _calendarApi!.events.insert(event, 'primary');
+    AppSnackbar.showSnackbar('Event "$title" scheduled for $dateTime', duration: const Duration(seconds: 3));
   }
 
-  // Add a method to create a Google Calendar event
-  Future<void> createGoogleCalendarEvent(String title, DateTime startTime, DateTime endTime, String? description) async {
-    if (_googleCalendarApi == null) {
-      await initializeGoogleCalendar();
-    }
-    try {
-      final event = google_calendar.Event(
-        summary: title,
-        description: description,
-        start: google_calendar.EventDateTime(dateTime: startTime.toUtc()),
-        end: google_calendar.EventDateTime(dateTime: endTime.toUtc()),
-      );
-      await _googleCalendarApi!.events.insert(event, 'primary');
-      AppSnackbar.showSnackbar('Event created successfully.');
-    } catch (e) {
-      print('Error creating Google Calendar event: $e');
-      AppSnackbar.showSnackbar('Failed to create Google Calendar event.');
-    }
-  }
-
-  // Add a method to update a Google Calendar event
-  Future<void> updateGoogleCalendarEvent(String eventId, DateTime newStartTime, DateTime newEndTime) async {
-    if (_googleCalendarApi == null) {
-      await initializeGoogleCalendar();
-    }
-    try {
-      final event = await _googleCalendarApi!.events.get('primary', eventId);
-      event.start = google_calendar.EventDateTime(dateTime: newStartTime.toUtc());
-      event.end = google_calendar.EventDateTime(dateTime: newEndTime.toUtc());
-      await _googleCalendarApi!.events.update(event, 'primary', eventId);
-      AppSnackbar.showSnackbar('Event updated successfully.');
-    } catch (e) {
-      print('Error updating Google Calendar event: $e');
-      AppSnackbar.showSnackbar('Failed to update Google Calendar event.');
-    }
-  }
-
-  // Add a method to delete a Google Calendar event
-  Future<void> deleteGoogleCalendarEvent(String eventId) async {
-    if (_googleCalendarApi == null) {
-      await initializeGoogleCalendar();
-    }
-    try {
-      await _googleCalendarApi!.events.delete('primary', eventId);
-      AppSnackbar.showSnackbar('Event deleted successfully.');
-    } catch (e) {
-      print('Error deleting Google Calendar event: $e');
-      AppSnackbar.showSnackbar('Failed to delete Google Calendar event.');
-    }
-  }
-
-  // Add a method to open Google Calendar event in the app
-  void openGoogleCalendarEvent(String eventId) {
-    final url = 'https://calendar.google.com/event?eid=$eventId';
-    // Use a package like `url_launcher` to open the URL
-    // Example: launchUrl(Uri.parse(url));
-  }
-}
-
-// Helper class for authenticated HTTP requests
-class GoogleAuthClient extends http.BaseClient {
-  final Map<String, String> _headers;
-  final http.Client _client = http.Client();
-
-  GoogleAuthClient(this._headers);
-
-  @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) {
-    request.headers.addAll(_headers);
-    return _client.send(request);
+  // View the linked calendar event directly (assuming a UI interaction)
+  Future<void> viewInCalendar(String eventId) async {
+    // Open the Google Calendar app with the event ID (you will need proper URL scheme handling)
+    // Example: _calendarUtil.openGoogleCalendarEvent(eventId);
   }
 }
